@@ -169,3 +169,10 @@
    npm run dev
    ```
    - 프론트엔드 서버는 `3000` 포트에서 실행되며, 백엔드와 자동으로 프록시 연동됩니다.
+
+  ## 9. 게임 화면
+  <img width="1910" height="897" alt="1" src="https://github.com/user-attachments/assets/7948a0ee-a8a0-4afa-b8fe-336c5b4ae185" />
+  
+  <img width="1900" height="912" alt="2" src="https://github.com/user-attachments/assets/75002845-e766-4db5-809b-9e9f42c5afa4" />
+  
+  <img width="1900" height="914" alt="3" src="https://github.com/user-attachments/assets/8cc05aa6-ae28-456c-b055-49495bce5cac" />
