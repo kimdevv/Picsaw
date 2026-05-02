@@ -1,0 +1,6 @@
+{
+  "name": "Pic-saw: Real-time Hybrid Puzzle",
+  "description": "A real-time collaborative puzzle game where users upload images, create puzzles, and solve them together with friends. Featuring AI-powered image censorship and dynamic hard-mode challenges.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
