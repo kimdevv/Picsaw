@@ -20,23 +20,25 @@ public class PuzzleGameController {
     @Autowired
     private SimpMessagingTemplate messagingTemplate;
 
-    // Movement sync (MOVE) - broadcast to all users in the room
+    @Autowired
+    private com.picsaw.puzzle.repository.PuzzleRoomRepository puzzleRoomRepository;
+
+    // Movement sync (MOVE)
     @MessageMapping("/room/{roomId}/move")
     public void movePiece(@DestinationVariable String roomId, MoveAction action) {
-        String key = "room:" + roomId + ":pieces";
+        String key = "room:" + roomId + ":user:" + action.getUserId() + ":pieces";
 
-        // Update Redis
-        Map<Object, Object> pieces = redisTemplate.opsForHash().entries(key);
-        PieceDTO state = (PieceDTO) pieces.get(action.getPieceId());
+        PieceDTO state = (PieceDTO) redisTemplate.opsForHash().get(key, action.getPieceId());
 
         if (state != null) {
             state.setCurrentX(action.getX());
             state.setCurrentY(action.getY());
             redisTemplate.opsForHash().put(key, action.getPieceId(), state);
 
-            // Broadcast
+            // Broadcast to other player
             messagingTemplate.convertAndSend("/topic/room/" + roomId, Map.of(
                     "type", "MOVE",
+                    "userId", action.getUserId(),
                     "pieceId", action.getPieceId(),
                     "x", action.getX(),
                     "y", action.getY()
@@ -47,17 +49,17 @@ public class PuzzleGameController {
     // Capture piece (PICK)
     @MessageMapping("/room/{roomId}/pick")
     public void pickPiece(@DestinationVariable String roomId, PickAction action) {
-        String key = "room:" + roomId + ":pieces";
+        String key = "room:" + roomId + ":user:" + action.getUserId() + ":pieces";
         PieceDTO state = (PieceDTO) redisTemplate.opsForHash().get(key, action.getPieceId());
 
-        if (state != null && state.getHeldBy() == null) {
+        if (state != null) {
             state.setHeldBy(action.getUserId());
             redisTemplate.opsForHash().put(key, action.getPieceId(), state);
 
             messagingTemplate.convertAndSend("/topic/room/" + roomId, Map.of(
                     "type", "PICK",
-                    "pieceId", action.getPieceId(),
-                    "userId", action.getUserId()
+                    "userId", action.getUserId(),
+                    "pieceId", action.getPieceId()
             ));
         }
     }
@@ -65,7 +67,7 @@ public class PuzzleGameController {
     // Release piece (DROP)
     @MessageMapping("/room/{roomId}/drop")
     public void dropPiece(@DestinationVariable String roomId, DropAction action) {
-        String key = "room:" + roomId + ":pieces";
+        String key = "room:" + roomId + ":user:" + action.getUserId() + ":pieces";
         PieceDTO state = (PieceDTO) redisTemplate.opsForHash().get(key, action.getPieceId());
 
         if (state != null) {
@@ -78,35 +80,33 @@ public class PuzzleGameController {
 
             messagingTemplate.convertAndSend("/topic/room/" + roomId, Map.of(
                     "type", "DROP",
+                    "userId", action.getUserId(),
                     "pieceId", action.getPieceId(),
                     "x", action.getX(),
                     "y", action.getY(),
                     "isCorrect", action.isCorrect()
             ));
+
+            // Check if finished and notify
+            if (action.isFinished()) {
+                // Update DB Status
+                puzzleRoomRepository.findById(roomId).ifPresent(room -> {
+                    room.setStatus("FINISHED");
+                    room.setWinnerId(action.getUserId());
+                    puzzleRoomRepository.save(room);
+                });
+
+                messagingTemplate.convertAndSend("/topic/room/" + roomId, Map.of(
+                        "type", "FINISHED",
+                        "userId", action.getUserId()
+                ));
+            }
         }
-    }
-
-    // Update player info (META)
-    @MessageMapping("/room/{roomId}/meta")
-    public void updateMeta(@DestinationVariable String roomId, MetaAction action) {
-        String key = "room:" + roomId + ":players";
-        redisTemplate.opsForHash().put(key, action.getUserId(), action.getNickname());
-
-        messagingTemplate.convertAndSend("/topic/room/" + roomId, Map.of(
-                "type", "META",
-                "userId", action.getUserId(),
-                "nickname", action.getNickname()
-        ));
-    }
-
-    @Data
-    public static class MetaAction {
-        private String userId;
-        private String nickname;
     }
 
     @Data
     public static class MoveAction {
+        private String userId;
         private String pieceId;
         private double x;
         private double y;
@@ -114,16 +114,19 @@ public class PuzzleGameController {
 
     @Data
     public static class PickAction {
-        private String pieceId;
         private String userId;
+        private String pieceId;
     }
 
     @Data
     public static class DropAction {
+        private String userId;
         private String pieceId;
         private double x;
         private double y;
         @com.fasterxml.jackson.annotation.JsonProperty("isCorrect")
         private boolean isCorrect;
+        @com.fasterxml.jackson.annotation.JsonProperty("isFinished")
+        private boolean isFinished;
     }
 }

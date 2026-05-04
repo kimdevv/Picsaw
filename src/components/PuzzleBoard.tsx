@@ -26,122 +26,41 @@ interface RoomData {
   difficulty: 'normal' | 'hard';
 }
 
-export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNickname }: { room: RoomData, onComplete?: () => void, onPlayersUpdate?: (players: Record<string, string>) => void, userNickname?: string }) {
+export default function PuzzleBoard({ 
+  room, 
+  pieces, 
+  setPieces, 
+  isReadOnly = false, 
+  userNickname, 
+  onPieceMove,
+  onPiecePick,
+  onPieceDrop
+}: { 
+  room: RoomData, 
+  pieces: Piece[], 
+  setPieces?: React.Dispatch<React.SetStateAction<Piece[]>>,
+  isReadOnly?: boolean,
+  userNickname?: string,
+  onPieceMove?: (pieceId: string, x: number, y: number) => void,
+  onPiecePick?: (pieceId: string) => void,
+  onPieceDrop?: (pieceId: string, x: number, y: number, isCorrect: boolean) => void
+}) {
   const { user } = useAuth();
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [pieces, setPieces] = useState<Piece[]>([]);
   const piecesRef = useRef<Piece[]>([]);
-  const [players, setPlayers] = useState<Record<string, string>>({}); // { userId: nickname }
-  const playersRef = useRef<Record<string, string>>({});
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [draggedPieceId, setDraggedPieceId] = useState<string | null>(null);
   const draggedPieceIdRef = useRef<string | null>(null);
   const offsetRef = useRef({ x: 0, y: 0 });
-  
-  const stompClientRef = useRef<Stomp.Client | null>(null);
   const lastUpdateTime = useRef<number>(0);
-
-  // Sync refs and Completion check
+  
   useEffect(() => {
     piecesRef.current = pieces;
-    // ... rest of the same effects ...
-  }, [pieces]); // I'll split these to be cleaner
-
-  useEffect(() => {
-    if (pieces.length === 0) return;
-    
-    const realPieces = pieces.filter(p => !p.id.startsWith('fake'));
-    const allCorrect = realPieces.length > 0 && realPieces.every(p => p.isCorrect);
-    
-    if (allCorrect) {
-      const timer = setTimeout(() => onComplete?.(), 500);
-      return () => clearTimeout(timer);
-    }
-  }, [pieces, onComplete]);
+  }, [pieces]);
 
   useEffect(() => {
     draggedPieceIdRef.current = draggedPieceId;
   }, [draggedPieceId]);
-
-  // Player meta sync effect
-  useEffect(() => {
-    playersRef.current = players;
-    onPlayersUpdate?.(players);
-  }, [players, onPlayersUpdate]);
-
-  // Handle outgoing nickname changes
-  useEffect(() => {
-    if (stompClientRef.current?.connected && user && userNickname) {
-      stompClientRef.current.send(`/pub/room/${room.id}/meta`, {}, JSON.stringify({
-        userId: user.uid,
-        nickname: userNickname
-      }));
-    }
-  }, [userNickname, user, room.id]);
-
-  // WebSocket update handler (stable)
-  const updateFromEvent = (event: any) => {
-    if (event.type === 'META') {
-      setPlayers(prev => ({ ...prev, [event.userId]: event.nickname }));
-      return;
-    }
-
-    setPieces(prev => prev.map(p => {
-      if (p.id !== event.pieceId) return p;
-      if (p.id === draggedPieceIdRef.current) return p;
-      
-      switch (event.type) {
-        case 'MOVE':
-          return { ...p, currentX: event.x, currentY: event.y };
-        case 'PICK':
-          return { ...p, heldBy: event.userId };
-        case 'DROP':
-          return { ...p, heldBy: null, currentX: event.x, currentY: event.y, isCorrect: event.isCorrect };
-        default:
-          return p;
-      }
-    }));
-  };
-
-  // Initial Load & WebSocket Connection
-  useEffect(() => {
-    const fetchData = async () => {
-      // Fetch pieces
-      const pRes = await fetch(`/api/room/${room.id}/pieces`);
-      if (pRes.ok) setPieces(await pRes.json());
-
-      // Fetch players
-      const plRes = await fetch(`/api/room/${room.id}/players`);
-      if (plRes.ok) {
-        const data = await plRes.json();
-        setPlayers(data);
-      }
-    };
-    fetchData();
-
-    const socket = new SockJS('/ws-puzzle');
-    const client = Stomp.over(socket);
-    client.debug = () => {};
-    client.connect({}, () => {
-      stompClientRef.current = client;
-      
-      // Initial identity broadcast if we have a nickname
-      if (userNickname && user) {
-        client.send(`/pub/room/${room.id}/meta`, {}, JSON.stringify({
-          userId: user.uid,
-          nickname: userNickname
-        }));
-      }
-
-      client.subscribe(`/topic/room/${room.id}`, (message) => {
-        updateFromEvent(JSON.parse(message.body));
-      });
-    });
-
-    return () => {
-      if (client.connected) client.disconnect(() => {});
-    };
-  }, [room.id]);
 
   // Load Image
   useEffect(() => {
@@ -150,7 +69,7 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
     img.onload = () => setImage(img);
   }, [room.imageUrl]);
 
-  // High Performance Render loop
+  // Render loop
   useEffect(() => {
     if (!image) return;
     let animId: number;
@@ -165,33 +84,19 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
       const dId = draggedPieceIdRef.current;
 
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Target area background
       ctx.fillStyle = '#f1f5f9'; 
       ctx.fillRect(50, 50, room.width, room.height);
-
-      // Target area border
       ctx.strokeStyle = '#cbd5e1';
       ctx.setLineDash([10, 5]);
       ctx.lineWidth = 1;
       ctx.strokeRect(50, 50, room.width, room.height);
       ctx.setLineDash([]);
 
-      // 1. Correct pieces (bottom layer)
       currentPieces.filter(p => p.isCorrect && !p.heldBy && p.id !== dId).forEach(p => drawPiece(ctx, p, true));
+      currentPieces.filter(p => (!p.isCorrect || p.heldBy) && p.id !== dId).forEach(p => drawPiece(ctx, p, false, p.heldBy === user?.uid, !!(p.heldBy && p.heldBy !== user?.uid)));
       
-      // 2. Others
-      currentPieces.filter(p => (!p.isCorrect || p.heldBy) && p.id !== dId).forEach(p => {
-        const isMe = p.heldBy === user?.uid;
-        const isOther = p.heldBy && p.heldBy !== user?.uid;
-        drawPiece(ctx, p, false, isMe, isOther);
-      });
-
-      // 3. Dragged piece (top layer)
       const draggedPiece = currentPieces.find(p => p.id === dId);
-      if (draggedPiece) {
-        drawPiece(ctx, draggedPiece, false, true, false);
-      }
+      if (draggedPiece) drawPiece(ctx, draggedPiece, false, true, false);
       
       animId = requestAnimationFrame(render);
     };
@@ -205,26 +110,14 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
       drawPieceShape(ctx, x, y, p.width, p.height, p.shapes, false);
       ctx.clip();
       
-      const sw = p.width + tabH * 2;
-      const sh = p.height + tabH * 2;
-      
       const sx = p.ansX - tabH;
       const sy = p.ansY - tabH;
-      
-      // Safety clip for edge pieces (prevents transparency)
       const sourceX = Math.max(0, sx);
       const sourceY = Math.max(0, sy);
-      const sourceW = sw - (sourceX - sx);
-      const sourceH = sh - (sourceY - sy);
+      const sourceW = (p.width + tabH * 2) - (sourceX - sx);
+      const sourceH = (p.height + tabH * 2) - (sourceY - sy);
       
-      const destX = x - tabH + (sourceX - sx);
-      const destY = y - tabH + (sourceY - sy);
-      
-      ctx.drawImage(
-        image, 
-        sourceX, sourceY, sourceW, sourceH,
-        destX, destY, sourceW, sourceH
-      );
+      ctx.drawImage(image, sourceX, sourceY, sourceW, sourceH, x - tabH + (sourceX - sx), y - tabH + (sourceY - sy), sourceW, sourceH);
       ctx.restore();
 
       ctx.save();
@@ -238,10 +131,12 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
 
     render();
     return () => cancelAnimationFrame(animId);
-  }, [image, room.width, room.height, user?.uid]); // NO pieces in dependency array!
+  }, [image, room.width, room.height, user?.uid]);
 
-  // Window events for dragging
+  // Drag logic
   useEffect(() => {
+    if (isReadOnly) return;
+
     const handleMouseMove = (e: MouseEvent) => {
       const pId = draggedPieceIdRef.current;
       if (!pId || !user) return;
@@ -257,21 +152,15 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
       const newX = (mouseX - 50) - offsetRef.current.x;
       const newY = (mouseY - 50) - offsetRef.current.y;
 
-      // Update refs immediately for rendering
       const target = piecesRef.current.find(p => p.id === pId);
       if (target) {
         target.currentX = newX;
         target.currentY = newY;
       }
 
-      // Throttle STOMP message
       const now = Date.now();
       if (now - lastUpdateTime.current > 50) {
-        stompClientRef.current?.send(`/pub/room/${room.id}/move`, {}, JSON.stringify({
-          pieceId: pId,
-          x: newX,
-          y: newY
-        }));
+        onPieceMove?.(pId, newX, newY);
         lastUpdateTime.current = now;
       }
     };
@@ -282,7 +171,7 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
       
       const p = piecesRef.current.find(p => p.id === pId);
       if (p) {
-        const snapThreshold = 65; // Further increased for better UX
+        const snapThreshold = 65;
         const isCorrect = !p.id.startsWith('fake') && 
                           Math.abs(p.currentX - p.ansX) < snapThreshold && 
                           Math.abs(p.currentY - p.ansY) < snapThreshold;
@@ -290,17 +179,8 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
         const finalX = isCorrect ? p.ansX : p.currentX;
         const finalY = isCorrect ? p.ansY : p.currentY;
 
-        console.log(`Drop piece ${pId}: isCorrect=${isCorrect}, dist=(${Math.abs(p.currentX - p.ansX)}, ${Math.abs(p.currentY - p.ansY)})`);
-
-        stompClientRef.current?.send(`/pub/room/${room.id}/drop`, {}, JSON.stringify({
-          pieceId: pId,
-          userId: user.uid,
-          x: finalX,
-          y: finalY,
-          isCorrect: isCorrect
-        }));
-
-        setPieces(prev => prev.map(item => 
+        onPieceDrop?.(pId, finalX, finalY, isCorrect);
+        setPieces?.(prev => prev.map(item => 
           item.id === pId ? { ...item, currentX: finalX, currentY: finalY, isCorrect, heldBy: null } : item
         ));
       }
@@ -313,10 +193,10 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [user, room.id]);
+  }, [user, room.id, isReadOnly, onPieceMove, onPieceDrop, setPieces]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
-    if (!user) return;
+    if (isReadOnly || !user) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -328,7 +208,6 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     
-    // Check pieces in reverse order (topmost first)
     const currentPieces = piecesRef.current;
     for (let i = currentPieces.length - 1; i >= 0; i--) {
       const p = currentPieces[i];
@@ -349,13 +228,7 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
             x: (mouseX - 50) - (p.isCorrect ? p.ansX : p.currentX), 
             y: (mouseY - 50) - (p.isCorrect ? p.ansY : p.currentY) 
           };
-          
-          stompClientRef.current?.send(`/pub/room/${room.id}/pick`, {}, JSON.stringify({
-            pieceId: p.id,
-            userId: user.uid
-          }));
-
-          // Local update to ref for immediate visual feedback
+          onPiecePick?.(p.id);
           p.heldBy = user.uid;
           return;
         }
@@ -364,23 +237,14 @@ export default function PuzzleBoard({ room, onComplete, onPlayersUpdate, userNic
   };
 
   return (
-    <div className="relative w-full h-[80vh] sm:h-[85vh] bg-gray-50 rounded-[40px] overflow-hidden shadow-[inset_0_2px_15px_rgba(0,0,0,0.05)] border border-gray-100 flex items-center justify-center p-4">
-      <div className="w-full h-full flex items-center justify-center">
-        <canvas
-          ref={canvasRef}
-          width={room.width * 1.5} 
-          height={room.height + 200}
-          onMouseDown={handleMouseDown}
-          className="max-w-full max-h-full w-auto h-auto object-contain cursor-grab active:cursor-grabbing bg-white rounded-3xl shadow-xl transition-all duration-300"
-        />
-      </div>
-      {room.difficulty === 'hard' && (
-        <motion.div 
-          animate={{ opacity: [0, 0.1, 0] }}
-          transition={{ duration: 4, repeat: Infinity }}
-          className="absolute inset-0 pointer-events-none bg-red-500/5 mix-blend-overlay"
-        />
-      )}
+    <div className={`relative bg-white rounded-3xl overflow-hidden shadow-xl border border-gray-100 ${isReadOnly ? 'scale-75 origin-top' : ''}`}>
+      <canvas
+        ref={canvasRef}
+        width={room.width * 1.5} 
+        height={room.height + 200}
+        onMouseDown={handleMouseDown}
+        className={`max-w-full max-h-full w-auto h-auto object-contain ${isReadOnly ? 'pointer-events-none' : 'cursor-grab active:cursor-grabbing'}`}
+      />
     </div>
   );
 }

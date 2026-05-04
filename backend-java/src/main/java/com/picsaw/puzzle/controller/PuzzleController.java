@@ -47,14 +47,10 @@ public class PuzzleController {
     }
 
     @Autowired
-    private org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate;
+    private com.picsaw.puzzle.service.MatchService matchService;
 
-    @GetMapping("/room/{roomId}/players")
-    public ResponseEntity<?> getRoomPlayers(@PathVariable String roomId) {
-        String key = "room:" + roomId + ":players";
-        Map<Object, Object> players = redisTemplate.opsForHash().entries(key);
-        return ResponseEntity.ok(players);
-    }
+    @Autowired
+    private org.springframework.data.redis.core.RedisTemplate<String, Object> redisTemplate;
 
     @PostMapping("/validate-image")
     public ResponseEntity<?> validateImage(@RequestBody Map<String, String> request) {
@@ -79,18 +75,97 @@ public class PuzzleController {
                 com.google.cloud.vision.v1.BatchAnnotateImagesResponse response = vision.batchAnnotateImages(java.util.List.of(apiReq));
                 com.google.cloud.vision.v1.SafeSearchAnnotation safeSearch = response.getResponses(0).getSafeSearchAnnotation();
 
-                // LIKELY(4) or VERY_LIKELY(5) check
                 if (safeSearch.getAdultValue() >= 4 || safeSearch.getViolenceValue() >= 4 || safeSearch.getRacyValue() >= 4) {
-                    return ResponseEntity.ok(Map.of("safe", false, "reason", "Image contains inappropriate content (Adult/Violence/Racy)."));
+                    return ResponseEntity.ok(Map.of("safe", false, "reason", "Image contains inappropriate content."));
                 }
-
                 return ResponseEntity.ok(Map.of("safe", true));
             }
         } catch (Exception e) {
-            System.err.println("Vision API Error: " + e.getMessage());
-            // Fallback for dev environment if credentials are missing
-            return ResponseEntity.ok(Map.of("safe", true, "warning", "Vision API check failed, passed by default. Error: " + e.getMessage()));
+            return ResponseEntity.ok(Map.of("safe", true)); // Fallback if API not configured
         }
+    }
+
+    @Autowired
+    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
+
+    @PostMapping("/match/random")
+    public ResponseEntity<?> randomMatch(@RequestBody Map<String, Object> request) {
+        String userId = (String) request.get("userId");
+        String image = (String) request.get("image");
+        Integer pieceCount = (Integer) request.get("pieceCount");
+        String difficulty = (String) request.get("difficulty");
+
+        if (userId == null) return ResponseEntity.badRequest().body("UserId is required");
+
+        java.util.Optional<String> opponentId = matchService.findMatch(userId);
+        if (opponentId.isPresent()) {
+            String roomId = java.util.UUID.randomUUID().toString();
+            String waiterId = opponentId.get();
+
+            System.out.println("Matching " + userId + " with waiter " + waiterId);
+
+            // Create the actual room in DB so both can join immediately
+            try {
+                PuzzleResponse puzzle = puzzleService.generatePuzzle(image, pieceCount, difficulty);
+                com.picsaw.puzzle.entity.PuzzleRoom room = new com.picsaw.puzzle.entity.PuzzleRoom();
+                room.setId(roomId);
+                room.setPieceCount(pieceCount);
+                room.setDifficulty(difficulty);
+                room.setWidth(puzzle.getWidth());
+                room.setHeight(puzzle.getHeight());
+                room.setImageUrl(puzzle.getImageUrl());
+                room.setCreatorId(userId);
+                room.setPlayer1Id(waiterId); // The waiter
+                room.setPlayer2Id(userId); // The matcher
+                room.setMatchType("RANDOM");
+                room.setStatus("PLAYING");
+                puzzleRoomRepository.save(room);
+
+                // Initialize Redis for BOTH
+                puzzleService.initializeRedisState(roomId, userId, puzzle.getPieces());
+                puzzleService.initializeRedisState(roomId, waiterId, puzzle.getPieces());
+
+                Map<String, String> matchData = Map.of(
+                        "roomId", roomId,
+                        "player1Id", waiterId,
+                        "player2Id", userId,
+                        "status", "MATCHED"
+                );
+
+                String matchDataJson = objectMapper.writeValueAsString(matchData);
+                redisTemplate.opsForValue().set("match:pending:" + userId, matchDataJson, java.time.Duration.ofMinutes(1));
+                redisTemplate.opsForValue().set("match:pending:" + waiterId, matchDataJson, java.time.Duration.ofMinutes(1));
+
+                System.out.println("Match keys set for " + userId + " and " + waiterId);
+                return ResponseEntity.ok(Map.of("status", "MATCHED", "data", matchData));
+            } catch (Exception e) {
+                System.err.println("Random match room generation failed: " + e.getMessage());
+                return ResponseEntity.internalServerError().build();
+            }
+        } else {
+            System.out.println("User " + userId + " waiting for match...");
+            return ResponseEntity.ok(Map.of("status", "WAITING"));
+        }
+    }
+
+    @GetMapping("/match/status/{userId}")
+    public ResponseEntity<?> getMatchStatus(@PathVariable String userId) {
+        Object data = redisTemplate.opsForValue().get("match:pending:" + userId);
+        if (data != null) {
+            redisTemplate.delete("match:pending:" + userId);
+            try {
+                // If it was stored as JSON string (or serialized map)
+                if (data instanceof String) {
+                    Map<String, String> matchMap = objectMapper.readValue((String) data, Map.class);
+                    return ResponseEntity.ok(Map.of("status", "MATCHED", "data", matchMap));
+                }
+                return ResponseEntity.ok(Map.of("status", "MATCHED", "data", data));
+            } catch (Exception e) {
+                System.err.println("Match status parse failed: " + e.getMessage());
+                return ResponseEntity.ok(Map.of("status", "MATCHED", "data", data));
+            }
+        }
+        return ResponseEntity.ok(Map.of("status", "WAITING"));
     }
 
     @PostMapping("/generate-puzzle")
@@ -114,33 +189,81 @@ public class PuzzleController {
                 room.setWidth(response.getWidth());
                 room.setHeight(response.getHeight());
                 room.setImageUrl(response.getImageUrl());
+                room.setCreatorId(request.getUserId());
+                room.setPlayer1Id(request.getUserId());
+                room.setMatchType(request.getMatchType()); // "RANDOM" or "PRIVATE"
+                room.setStatus(request.getMatchType().equals("RANDOM") ? "PLAYING" : "WAITING");
+
                 puzzleRoomRepository.save(room);
 
-                // Initialize Redis Piece State
-                puzzleService.initializeRedisState(roomId, response.getPieces());
+                // Initialize Redis Piece State for BOTH players if RANDOM, or creator if PRIVATE
+                puzzleService.initializeRedisState(roomId, request.getUserId(), response.getPieces());
+                if (request.getOpponentId() != null) {
+                    puzzleService.initializeRedisState(roomId, request.getOpponentId(), response.getPieces());
+                }
 
                 System.out.println("Room saved and Redis initialized ID: " + roomId);
+                return ResponseEntity.ok(response);
             } catch (Exception dbEx) {
                 System.err.println("DB Save failed: " + dbEx.getMessage());
+                return ResponseEntity.internalServerError().build();
             }
-
-            return ResponseEntity.ok(response);
         } catch (Exception e) {
+            System.err.println("Generate puzzle failed: " + e.getMessage());
             return ResponseEntity.internalServerError().build();
         }
     }
 
+    @Autowired
+    private org.springframework.messaging.simp.SimpMessagingTemplate messagingTemplate;
+
     @GetMapping("/room/{roomId}")
-    public ResponseEntity<?> getRoom(@PathVariable String roomId) {
+    public ResponseEntity<?> getRoom(@PathVariable String roomId, @RequestParam(required = false) String userId) {
         return puzzleRoomRepository.findById(roomId)
-                .map(ResponseEntity::ok)
+                .map(room -> {
+                    if (userId != null && "PRIVATE".equals(room.getMatchType()) && room.getPlayer2Id() == null && !userId.equals(room.getPlayer1Id())) {
+                        room.setPlayer2Id(userId);
+                        room.setStatus("PLAYING");
+                        puzzleRoomRepository.save(room);
+
+                        try {
+                            String p1Key = "room:" + roomId + ":user:" + room.getPlayer1Id() + ":pieces";
+                            String p2Key = "room:" + roomId + ":user:" + userId + ":pieces";
+                            Map<Object, Object> p1Pieces = redisTemplate.opsForHash().entries(p1Key);
+                            if (!p1Pieces.isEmpty()) {
+                                redisTemplate.opsForHash().putAll(p2Key, p1Pieces);
+                            }
+
+                            // Notify creator that someone joined
+                            messagingTemplate.convertAndSend("/topic/room/" + roomId, Map.of(
+                                    "type", "JOIN",
+                                    "userId", userId
+                            ));
+                        } catch (Exception e) {
+                            System.err.println("Failed to copy pieces or notify join: " + e.getMessage());
+                        }
+                    }
+                    return ResponseEntity.ok(room);
+                })
                 .orElse(ResponseEntity.notFound().build());
     }
 
+    @PostMapping("/room/{roomId}/join")
+    public ResponseEntity<?> joinRoom(@PathVariable String roomId, @RequestBody Map<String, String> request) {
+        String userId = request.get("userId");
+        return puzzleRoomRepository.findById(roomId).map(room -> {
+            if (room.getPlayer2Id() == null && !room.getPlayer1Id().equals(userId)) {
+                room.setPlayer2Id(userId);
+                room.setStatus("PLAYING");
+                puzzleRoomRepository.save(room);
+            }
+            return ResponseEntity.ok(room);
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
     @GetMapping("/room/{roomId}/pieces")
-    public ResponseEntity<?> getRoomPieces(@PathVariable String roomId) {
-        String key = "room:" + roomId + ":pieces";
-        return ResponseEntity.ok(puzzleService.getRoomPiecesFromRedis(key));
+    public ResponseEntity<?> getRoomPieces(@PathVariable String roomId, @RequestParam String userId) {
+        return ResponseEntity.ok(puzzleService.getRoomPiecesFromRedis(roomId, userId));
     }
 
     @Data
@@ -148,5 +271,8 @@ public class PuzzleController {
         private String image;
         private int pieceCount;
         private String difficulty;
+        private String userId;
+        private String matchType;
+        private String opponentId;
     }
 }

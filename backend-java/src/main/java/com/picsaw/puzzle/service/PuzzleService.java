@@ -88,52 +88,55 @@ public class PuzzleService {
             }
         }
 
-        // 5. Add fake pieces (scaling with difficulty)
-        float fakeRatio = "hard".equals(difficulty) ? 0.2f : 0.0f;
-        int fakeCount = Math.max(2, (int) (pieces.size() * fakeRatio));
-        for (int i = 0; i < fakeCount; i++) {
-            PieceDTO source = pieces.get(rand.nextInt(pieces.size()));
+        // 5. Add fake pieces ONLY in survival (hard) mode
+        if ("hard".equals(difficulty)) {
+            float fakeRatio = 0.2f;
+            int fakeCount = Math.max(2, (int) (pieces.size() * fakeRatio));
+            for (int i = 0; i < fakeCount; i++) {
+                PieceDTO source = pieces.get(rand.nextInt(pieces.size()));
 
-            // Edge-aware randomization for fake pieces
-            int top = (source.getAnsY() == 0) ? 0 : (rand.nextBoolean() ? 1 : -1);
-            int left = (source.getAnsX() == 0) ? 0 : (rand.nextBoolean() ? 1 : -1);
-            int bottom = (source.getAnsY() + source.getHeight() >= finalH) ? 0 : (rand.nextBoolean() ? 1 : -1);
-            int right = (source.getAnsX() + source.getWidth() >= finalW) ? 0 : (rand.nextBoolean() ? 1 : -1);
+                // Edge-aware randomization for fake pieces
+                int top = (source.getAnsY() == 0) ? 0 : (rand.nextBoolean() ? 1 : -1);
+                int left = (source.getAnsX() == 0) ? 0 : (rand.nextBoolean() ? 1 : -1);
+                int bottom = (source.getAnsY() + source.getHeight() >= finalH) ? 0 : (rand.nextBoolean() ? 1 : -1);
+                int right = (source.getAnsX() + source.getWidth() >= finalW) ? 0 : (rand.nextBoolean() ? 1 : -1);
 
-            // FORCE at least one change if it happens to be the same shape as source
-            if (top == source.getShapes().getTop() && right == source.getShapes().getRight() &&
-                    bottom == source.getShapes().getBottom() && left == source.getShapes().getLeft()) {
-                if (top != 0) top = -top;
-                else if (right != 0) right = -right;
-                else if (bottom != 0) bottom = -bottom;
-                else if (left != 0) left = -left;
+                // FORCE at least one change if it happens to be the same shape as source
+                if (top == source.getShapes().getTop() && right == source.getShapes().getRight() &&
+                        bottom == source.getShapes().getBottom() && left == source.getShapes().getLeft()) {
+                    if (top != 0) top = -top;
+                    else if (right != 0) right = -right;
+                    else if (bottom != 0) bottom = -bottom;
+                    else if (left != 0) left = -left;
+                }
+
+                pieces.add(PieceDTO.builder()
+                        .id("fake-" + idCounter++)
+                        .ansX(source.getAnsX())
+                        .ansY(source.getAnsY())
+                        .currentX(finalW + 100 + rand.nextDouble() * (finalW * 0.4))
+                        .currentY(rand.nextDouble() * (finalH - source.getHeight()))
+                        .width(source.getWidth())
+                        .height(source.getHeight())
+                        .shapes(new PieceShape(top, right, bottom, left))
+                        .isCorrect(false)
+                        .heldBy(null)
+                        .build());
             }
-
-            pieces.add(PieceDTO.builder()
-                    .id("fake-" + idCounter++)
-                    .ansX(source.getAnsX())
-                    .ansY(source.getAnsY())
-                    .currentX(finalW + 100 + rand.nextDouble() * (finalW * 0.4))
-                    .currentY(rand.nextDouble() * (finalH - source.getHeight()))
-                    .width(source.getWidth())
-                    .height(source.getHeight())
-                    .shapes(new PieceShape(top, right, bottom, left))
-                    .isCorrect(false)
-                    .heldBy(null)
-                    .build());
         }
 
         return new PuzzleResponse(null, resizedBase64, finalW, finalH, rows, cols, pieces);
     }
 
-    public void initializeRedisState(String roomId, List<PieceDTO> pieces) {
-        String key = "room:" + roomId + ":pieces";
+    public void initializeRedisState(String roomId, String userId, List<PieceDTO> pieces) {
+        String key = "room:" + roomId + ":user:" + userId + ":pieces";
         for (PieceDTO p : pieces) {
             redisTemplate.opsForHash().put(key, p.getId(), p);
         }
     }
 
-    public List<Object> getRoomPiecesFromRedis(String key) {
+    public List<Object> getRoomPiecesFromRedis(String roomId, String userId) {
+        String key = "room:" + roomId + ":user:" + userId + ":pieces";
         return new ArrayList<>(redisTemplate.opsForHash().values(key));
     }
 }

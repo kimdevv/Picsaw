@@ -11,19 +11,28 @@ import java.time.LocalDateTime;
 @Setter
 public class PuzzleRoom {
     @Id
-    private String id; // Firestore Room ID와 매칭 가능
-    
+    private String id;
+
     private String creatorId;
+    private String player1Id;
+    private String player2Id;
     private int pieceCount;
     private String difficulty;
-    
+
     @Column(columnDefinition = "MEDIUMTEXT")
     private String imageUrl;
-    
+
     private int width;
     private int height;
-    
+
+    private boolean isPlayer1Finished;
+    private boolean isPlayer2Finished;
     private boolean isCompleted;
+    private String winnerId;
+
+    private String matchType; // "RANDOM" or "PRIVATE"
+    private String status; // "WAITING", "PLAYING", "FINISHED"
+
     private LocalDateTime createdAt;
 
     @PrePersist
